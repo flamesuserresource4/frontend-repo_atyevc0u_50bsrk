@@ -1,30 +1,46 @@
-import { useEffect, useMemo, useState } from 'react'
-import { supabase } from './lib/supabaseClient'
+import { useEffect, useState } from 'react'
 
-function useAuth() {
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
+function uuid() {
+  // Simple UUID v4 generator for client_id
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0,
+      v = c === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
 
+function useClientId() {
+  const [clientId, setClientId] = useState(null)
   useEffect(() => {
-    let mounted = true
-    const init = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (mounted) setUser(session?.user ?? null)
-      setLoading(false)
+    let id = localStorage.getItem('smart-ledger-client-id')
+    if (!id) {
+      id = uuid()
+      localStorage.setItem('smart-ledger-client-id', id)
     }
-    init()
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-    })
-
-    return () => {
-      mounted = false
-      subscription.unsubscribe()
-    }
+    setClientId(id)
   }, [])
+  return clientId
+}
 
-  return { user, loading }
+const BASE_URL = import.meta.env.VITE_BACKEND_URL || ''
+
+async function apiGet(path) {
+  const res = await fetch(`${BASE_URL}${path}`)
+  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`)
+  return res.json()
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const txt = await res.text()
+    throw new Error(`POST ${path} failed: ${res.status} ${txt}`)
+  }
+  return res.json()
 }
 
 function TextInput({ label, placeholder, value, onChange, type = 'text' }) {
@@ -72,19 +88,17 @@ function Toast({ message, type, onClose }) {
   if (!message) return null
   const color = type === 'error' ? 'bg-red-500' : 'bg-emerald-500'
   return (
-    <div className={`fixed bottom-6 right-6 ${color} text-white px-4 py-2 rounded-lg shadow-lg`}
-      onClick={onClose}
-    >
+    <div className={`fixed bottom-6 right-6 ${color} text-white px-4 py-2 rounded-lg shadow-lg`} onClick={onClose}>
       {message}
     </div>
   )
 }
 
 function App() {
-  const { user, loading: authLoading } = useAuth()
+  const clientId = useClientId()
   const [toast, setToast] = useState({ message: '', type: 'success' })
 
-  // Local form states
+  const [loading, setLoading] = useState(true)
   const [bankAmount, setBankAmount] = useState('')
   const [expenseAmount, setExpenseAmount] = useState('')
   const [expenseMonth, setExpenseMonth] = useState('')
@@ -95,7 +109,6 @@ function App() {
   const [reminderTitle, setReminderTitle] = useState('')
   const [reminderDate, setReminderDate] = useState('')
 
-  // Loading states
   const [saving, setSaving] = useState({})
 
   const showToast = (message, type = 'success') => {
@@ -103,155 +116,55 @@ function App() {
     setTimeout(() => setToast({ message: '', type }), 2000)
   }
 
-  // Fetch initial data when user logs in
+  // Initial load
   useEffect(() => {
-    if (!user) return
+    if (!clientId) return
+    const load = async () => {
+      try {
+        setLoading(true)
+        const data = await apiGet(`/api/dashboard/${clientId}`)
+        const bank = data.bank_balance
+        if (bank) setBankAmount(bank.amount ?? '')
 
-    const fetchAll = async () => {
-      const uid = user.id
-      // bank_balance (single latest row)
-      const { data: bank } = await supabase
-        .from('bank_balance')
-        .select('*')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (bank) setBankAmount(bank.amount ?? '')
+        const exp = data.expenses
+        if (exp) {
+          setExpenseAmount(exp.amount ?? '')
+          setExpenseMonth(exp.month ?? '')
+        }
 
-      // expenses (latest)
-      const { data: exp } = await supabase
-        .from('expenses')
-        .select('*')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (exp) {
-        setExpenseAmount(exp.amount ?? '')
-        setExpenseMonth(exp.month ?? '')
-      }
+        const sale = data.sales
+        if (sale) setSalesAmount(sale.amount ?? '')
 
-      // sales (latest)
-      const { data: sale } = await supabase
-        .from('sales')
-        .select('*')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (sale) setSalesAmount(sale.amount ?? '')
+        const ord = data.orders
+        if (ord) {
+          setOrdersTotal(ord.total_orders ?? '')
+          setOrdersPending(ord.pending ?? '')
+          setOrdersCompleted(ord.completed ?? '')
+        }
 
-      // orders (latest)
-      const { data: ord } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (ord) {
-        setOrdersTotal(ord.total_orders ?? '')
-        setOrdersPending(ord.pending ?? '')
-        setOrdersCompleted(ord.completed ?? '')
-      }
-
-      // reminders (latest)
-      const { data: rem } = await supabase
-        .from('reminders')
-        .select('*')
-        .eq('user_id', uid)
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (rem) {
-        setReminderTitle(rem.title ?? '')
-        setReminderDate(rem.due_date ? rem.due_date.substring(0, 10) : '')
+        const rem = data.reminders
+        if (rem) {
+          setReminderTitle(rem.title ?? '')
+          setReminderDate(rem.due_date ? String(rem.due_date).substring(0, 10) : '')
+        }
+      } catch (e) {
+        showToast(e.message || 'Error loading data', 'error')
+      } finally {
+        setLoading(false)
       }
     }
+    load()
+  }, [clientId])
 
-    fetchAll()
-  }, [user])
-
-  // Realtime subscriptions per table for current user
-  useEffect(() => {
-    if (!user) return
-    const uid = user.id
-
-    const channel = supabase.channel('dashboard-realtime')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'bank_balance', filter: `user_id=eq.${uid}` },
-        (payload) => {
-          const row = payload.new || payload.old
-          if (row?.user_id !== uid) return
-          setBankAmount(row.amount ?? '')
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'expenses', filter: `user_id=eq.${uid}` },
-        (payload) => {
-          const row = payload.new || payload.old
-          if (row?.user_id !== uid) return
-          setExpenseAmount(row.amount ?? '')
-          setExpenseMonth(row.month ?? '')
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'sales', filter: `user_id=eq.${uid}` },
-        (payload) => {
-          const row = payload.new || payload.old
-          if (row?.user_id !== uid) return
-          setSalesAmount(row.amount ?? '')
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'orders', filter: `user_id=eq.${uid}` },
-        (payload) => {
-          const row = payload.new || payload.old
-          if (row?.user_id !== uid) return
-          setOrdersTotal(row.total_orders ?? '')
-          setOrdersPending(row.pending ?? '')
-          setOrdersCompleted(row.completed ?? '')
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'reminders', filter: `user_id=eq.${uid}` },
-        (payload) => {
-          const row = payload.new || payload.old
-          if (row?.user_id !== uid) return
-          setReminderTitle(row.title ?? '')
-          setReminderDate(row.due_date ? row.due_date.substring(0,10) : '')
-        }
-      )
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [user])
-
-  const upsertSingle = async (table, values) => {
-    if (!user) return
-    const uid = user.id
-    const payload = { ...values, user_id: uid }
-
-    // Prefer upsert to keep a single record per user in each table
-    const { error } = await supabase
-      .from(table)
-      .upsert(payload, { onConflict: 'user_id' })
-
-    if (error) throw error
+  const upsert = async (table, values) => {
+    if (!clientId) return
+    await apiPost(`/api/upsert/${table}`, { client_id: clientId, values })
   }
 
   const saveBank = async () => {
     try {
       setSaving((s) => ({ ...s, bank: true }))
-      await upsertSingle('bank_balance', { amount: bankAmount === '' ? null : Number(bankAmount) })
+      await upsert('bank_balance', { amount: bankAmount === '' ? null : Number(bankAmount) })
       showToast('Bank balance saved')
     } catch (e) {
       showToast(e.message || 'Error saving bank balance', 'error')
@@ -263,7 +176,7 @@ function App() {
   const saveExpense = async () => {
     try {
       setSaving((s) => ({ ...s, expenses: true }))
-      await upsertSingle('expenses', {
+      await upsert('expenses', {
         amount: expenseAmount === '' ? null : Number(expenseAmount),
         month: expenseMonth || null,
       })
@@ -278,7 +191,7 @@ function App() {
   const saveSales = async () => {
     try {
       setSaving((s) => ({ ...s, sales: true }))
-      await upsertSingle('sales', { amount: salesAmount === '' ? null : Number(salesAmount) })
+      await upsert('sales', { amount: salesAmount === '' ? null : Number(salesAmount) })
       showToast('Sales saved')
     } catch (e) {
       showToast(e.message || 'Error saving sales', 'error')
@@ -290,7 +203,7 @@ function App() {
   const saveOrders = async () => {
     try {
       setSaving((s) => ({ ...s, orders: true }))
-      await upsertSingle('orders', {
+      await upsert('orders', {
         total_orders: ordersTotal === '' ? null : parseInt(ordersTotal, 10),
         pending: ordersPending === '' ? null : parseInt(ordersPending, 10),
         completed: ordersCompleted === '' ? null : parseInt(ordersCompleted, 10),
@@ -306,7 +219,7 @@ function App() {
   const saveReminder = async () => {
     try {
       setSaving((s) => ({ ...s, reminders: true }))
-      await upsertSingle('reminders', {
+      await upsert('reminders', {
         title: reminderTitle || null,
         due_date: reminderDate || null,
       })
@@ -318,30 +231,10 @@ function App() {
     }
   }
 
-  if (authLoading) {
+  if (loading || !clientId) {
     return (
       <div className="min-h-screen grid place-items-center bg-slate-900">
         <div className="text-blue-200">Loading...</div>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-8">
-        <div className="bg-slate-800/60 border border-blue-500/20 rounded-2xl p-8 max-w-md w-full text-center">
-          <h1 className="text-2xl font-semibold text-white mb-2">Smart Ledger</h1>
-          <p className="text-blue-200 mb-6">Please sign in to view your dashboard.</p>
-          <button
-            onClick={async () => {
-              const { error } = await supabase.auth.signInWithOAuth({ provider: 'google' })
-              if (error) showToast(error.message, 'error')
-            }}
-            className="w-full px-4 py-2 rounded-lg bg-blue-500 hover:bg-blue-600 text-white"
-          >
-            Continue with Google
-          </button>
-        </div>
       </div>
     )
   }
@@ -354,14 +247,11 @@ function App() {
         <div className="max-w-5xl mx-auto space-y-6">
           <div className="flex items-center justify-between">
             <h1 className="text-2xl md:text-3xl font-bold text-white">Smart Ledger</h1>
-            <div className="flex items-center gap-3">
-              <span className="text-blue-200 text-sm">{user.email}</span>
-              <button
-                onClick={async () => { await supabase.auth.signOut() }}
-                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-blue-100 text-sm"
-              >
-                Sign out
-              </button>
+            <div className="flex items-center gap-3 text-blue-200 text-sm">
+              <span>Client ID:</span>
+              <code className="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-blue-100">
+                {clientId?.slice(0, 8)}…
+              </code>
             </div>
           </div>
 
